@@ -25,7 +25,7 @@ Install dependencies:
 
 ```bash
 pip install -r requirements.txt
-```
+````
 
 ---
 
@@ -39,11 +39,8 @@ pip install -r requirements.txt
 2. **Clone the Repo**
 
    ```bash
-   ```
-
 git clone [https://github.com/danielplaskur/Automation.git](https://github.com/danielplaskur/Automation.git)
 cd Automation/Twitch
-
 ````
 
 3. **Generate the `.env_twitch` Template**
