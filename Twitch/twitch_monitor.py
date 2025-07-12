@@ -100,6 +100,7 @@ def main():
             for name in live_names - opened:
                 print(f"Detected {name} is live. Opening stream...")
                 subprocess.run(['open', f'https://twitch.tv/{name}'])
+                # subprocess.run(['start', 'brave', f'https://twitch.tv/{name}'], shell=True)
                 opened.add(name)
 
             # Remove channels that went offline
