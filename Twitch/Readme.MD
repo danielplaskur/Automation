@@ -11,6 +11,7 @@
 - 🌐 **Auto-Open Streams**: Opens new live streams in your default browser.
 - 🔄 **Reopens Ended Streams**: Detects when channels go offline and then back online.
 - ⚙️ **Configurable**: Customize channels, polling intervals, and .env path.
+- Uses the Twitch Helix **Get Streams** API endpoint: [Get Streams](https://dev.twitch.tv/docs/api/reference/#get-streams)
 
 ---
 
@@ -21,17 +22,15 @@
 
 ---
 
-## Installation
+## Setup
+0. **Create a custom Twitch application** at [https://dev.twitch.tv/console/apps](https://dev.twitch.tv/console/apps) to get your `CLIENT_ID` and `CLIENT_SECRET`.
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/yourusername/twitch-stream-monitor.git
-   cd twitch-stream-monitor
-   ```
+1. **Clone or download** this script.
 
-2. **Install dependencies**
+2. **Run the script** once to generate the `.env` template:
+
    ```bash
-   pip install -r requirements.txt
+   python twitch_monitor.py
    ```
 
 3. **Create and configure** your `.env_twitch` file:
@@ -43,15 +42,13 @@
    ACCESS_TOKEN=
    ```
 
+4. **Run** the script again to start monitoring:
+
+   ```bash
+   python twitch_monitor.py
+   ```
+
 ---
-
-## Usage
-
-Run the monitor script:
-
-```bash
-python twitch_monitor.py
-```
 
 The script will:
 1. Load your Twitch credentials from `.env_twitch`.
@@ -99,7 +96,7 @@ Ensure `.env_twitch` is located at `~/.env_twitch` or update the `env_path` vari
 
 ## License
 
-MIT License. See `LICENSE` for details.
+MIT License.
 
 ---
 
