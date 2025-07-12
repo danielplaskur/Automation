@@ -25,7 +25,7 @@ Install dependencies:
 
 ```bash
 pip install -r requirements.txt
-````
+```
 
 ---
 
@@ -41,19 +41,18 @@ pip install -r requirements.txt
    ```bash
 git clone [https://github.com/danielplaskur/Automation.git](https://github.com/danielplaskur/Automation.git)
 cd Automation/Twitch
-````
+```
 
 3. **Generate the `.env_twitch` Template**
    ```bash
 python twitch_monitor.py
-````
+```
 
 This creates a `.env_twitch` file in your home directory.
 
 4. **Edit `.env_twitch`**
 
    ```dotenv
-   ```
 
 CLIENT\_ID=your\_client\_id
 CLIENT\_SECRET=your\_client\_secret
@@ -65,7 +64,7 @@ ACCESS\_TOKEN=
 5. **Run the Monitor**
    ```bash
 python twitch_monitor.py
-````
+```
 
 ---
 
