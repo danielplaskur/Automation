@@ -53,10 +53,10 @@ This creates a `.env_twitch` file in your home directory.
 4. **Edit `.env_twitch`**
 
 ```dotenv
-CLIENT\_ID=your\_client\_id
-CLIENT\_SECRET=your\_client\_secret
-USER\_LOGINS=channel1,channel2,channel3
-ACCESS\_TOKEN=
+CLIENT_ID=your_client_id
+CLIENT_SECRET=your_client_secret
+USER_LOGINS=channel1,channel2,channel3
+ACCESS_TOKEN=
 ```
 
 5. **Run the Monitor**
