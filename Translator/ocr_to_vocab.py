@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 import re
 import time
+import argparse
+from datetime import datetime
 import sqlite3
 import pyautogui
 import pytesseract
 from pathlib import Path
-from PIL import Image
+from PIL import Image, ImageOps, ImageFilter, ImageStat
 from collections import Counter
 
 # ---------------- Configuration ----------------
 # WIKDICT_URL = "https://download.wikdict.com/dictionaries/sqlite/2_2025-08/de-en.sqlite3"
 # 'lexentry', 'sense_num', 'sense', 'written_rep', 'trans_list', 'score', 'is_good', 'importance'
-DB_PATH = "de-en.sqlite3"
-OUTPUT_CSV = "words.csv"
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = BASE_DIR / "de-en.sqlite3"
+OUTPUT_CSV = BASE_DIR / "words.csv"
+SESSION_FILE = BASE_DIR / "session.txt"
 
 # Auto OCR configuration
 OCR_INTERVAL_SEC = 1.5   # how often to OCR the region
@@ -55,13 +59,51 @@ def prompt_region():
     return (left, top, width, height)
 
 
-def ocr_region(region):
-    # pyautogui.screenshot(region=(left, top, width, height))
+def preprocess_for_ocr(img: Image.Image, scale: float = 2.0, auto_invert: bool = True) -> Image.Image:
+    g = img.convert("L")
+    # If background is dark (white text on black), invert to black text on white
+    if auto_invert:
+        try:
+            mean = ImageStat.ImageStat(g).mean[0]
+            if mean < 128:
+                g = ImageOps.invert(g)
+        except Exception:
+            pass
+    # Improve contrast slightly
+    g = ImageOps.autocontrast(g, cutoff=1)
+    # Upscale for better character separation
+    if scale and scale != 1.0:
+        w, h = g.size
+        g = g.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+    # Unsharp mask for crisper glyph edges
+    try:
+        g = g.filter(ImageFilter.UnsharpMask(radius=1.2, percent=150, threshold=3))
+    except Exception:
+        g = g.filter(ImageFilter.SHARPEN)
+    return g
+
+
+def ocr_region(region, debug_path=None, config: str = None, lang: str = TESS_LANG, scale: float = 2.0, auto_invert: bool = True):
+    # Screenshot
     img: Image.Image = pyautogui.screenshot(region=region)
-    # Light preprocessing: convert to grayscale; let Tesseract handle thresholding
-    img = img.convert("L")
-    # OCR in German
-    text = pytesseract.image_to_string(img, lang=TESS_LANG, config="--psm 6")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    # Save raw capture if debugging
+    if debug_path:
+        try:
+            Path(debug_path).mkdir(parents=True, exist_ok=True)
+            img.save(Path(debug_path) / f"capture_{ts}.png")
+        except Exception as e:
+            print(f"Debug save failed: {e}")
+    # Preprocess for OCR
+    pimg = preprocess_for_ocr(img, scale=scale, auto_invert=auto_invert)
+    if debug_path:
+        try:
+            pimg.save(Path(debug_path) / f"capture_{ts}_prep.png")
+        except Exception as e:
+            print(f"Debug save failed: {e}")
+    # OCR
+    cfg = config if config is not None else "--psm 6 --oem 3"
+    text = pytesseract.image_to_string(pimg, lang=lang, config=cfg)
     return text
 
 
@@ -83,14 +125,98 @@ def get_translations_for_word_exact(db_path: Path, word: str):
         con.close()
 
 
+def get_first_translation(db_path: Path, word: str):
+    res = get_translations_for_word_exact(db_path, word)
+    if not res:
+        return None
+    # `res` is expected to be a string with variants like "a | b | c"
+    if isinstance(res, list):
+        s = res[0] if res else None
+    else:
+        s = res
+    if not s:
+        return None
+    first = s.split("|")[0].strip()
+    return first if first else None
+
+
+def preserve_case(src: str, dst: str) -> str:
+    if not dst:
+        return dst
+    if src.isupper():
+        return dst.upper()
+    if src[0].isupper():
+        return dst[0].upper() + dst[1:]
+    return dst
+
+
+def translate_sentence(db_path: Path, sentence: str) -> str:
+    def repl(m: re.Match):
+        token = m.group(0)
+        t = get_first_translation(db_path, token)
+        if not t:
+            return token  # leave unknown words as-is
+        return preserve_case(token, t)
+
+    return WORD_RE.sub(repl, sentence)
+
+
+def extract_complete_sentences(text: str):
+    # Split text into sentences and return only those that end with '.' or '?'
+    parts = [s.strip() for s in SENT_SPLIT_RE.split(text) if s.strip()]
+    return [s for s in parts if s.endswith('.') or s.endswith('?')]
+
+
+def normalize_for_sentence_accum(text: str) -> str:
+    # Collapse newlines and repeated whitespace to single spaces for stable accumulation
+    return re.sub(r"[\s\r\n]+", " ", text).strip()
+
+
+def completed_sentences_and_remainder(text: str):
+    """
+    Return (completed_sentences, remainder). Completed sentences end with '.' or '?'.
+    The remainder is the trailing fragment after the last terminator.
+    """
+    if not text:
+        return [], ""
+    end = max(text.rfind("."), text.rfind("?"))
+    if end == -1:
+        return [], text.strip()
+    completed_chunk = text[: end + 1]
+    remainder = text[end + 1 :].strip()
+    sentences = [s.strip() for s in re.split(r"(?<=[.?!])\s+", completed_chunk) if s.strip()]
+    return sentences, remainder
+
+
 def main():
     try:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--debug", action="store_true", help="Save captured region images to debug/ with timestamps")
+        parser.add_argument("--psm", type=int, default=3, help="Tesseract page segmentation mode (3, 6, 7, 13). Default 3")
+        parser.add_argument("--oem", type=int, default=3, help="Tesseract OCR engine mode (1=LSTM only, 3=Default). Default 3")
+        parser.add_argument("--scale", type=float, default=2.0, help="Upscale factor before OCR. Default 2.0")
+        parser.add_argument("--whitelist", action="store_true", help="Restrict characters to letters, umlauts, ß, digits, common punctuation")
+        parser.add_argument("--deu-only", action="store_true", help="Use German language only for OCR")
+        parser.add_argument("--no-auto-invert", action="store_true", help="Disable automatic invert when background is dark")
+        args = parser.parse_args()
+        debug = args.debug
+        debug_dir = (Path(OUTPUT_CSV).parent / "debug") if debug else None
+        ocr_lang = "deu" if args.deu_only else TESS_LANG
+        ocr_cfg = f"--psm {args.psm} --oem {args.oem}"
+        if args.whitelist:
+            # Include space in whitelist; quote the value and preserve interword spaces
+            wl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß0123456789.,;:()[]-?!%+/ "
+            ocr_cfg += f' -c tessedit_char_whitelist="{wl}" -c preserve_interword_spaces=1'
+        ocr_scale = args.scale
+        auto_invert = not args.no_auto_invert
         region = prompt_region()
         last_text = ""
         seen_words = set()
         all_words = list()
+        seen_sentences = set()
+        carry = ""
         while True:
-            text = ocr_region(region)
+            text = ocr_region(region, debug_dir, config=ocr_cfg, lang=ocr_lang, scale=ocr_scale, auto_invert=auto_invert)
             if not text or not text.strip():
                 time.sleep(OCR_INTERVAL_SEC)
                 continue
@@ -100,19 +226,45 @@ def main():
                 continue
 
             last_text = text
+            # Accumulate text across OCR frames until a sentence terminator appears
+            cleaned = normalize_for_sentence_accum(last_text)
+            batch = f"{carry} {cleaned}".strip() if carry else cleaned
+            completed, carry = completed_sentences_and_remainder(batch)
+            new_sentences = [s for s in completed if s not in seen_sentences]
+            if new_sentences:
+                # Translate and print all newly seen complete sentences in order
+                for s in new_sentences:
+                    translated = translate_sentence(DB_PATH, s)
+                    print(f"{s}\n=> {translated}\n")
+                # Append only originals to session.txt, one per line
+                try:
+                    with open(SESSION_FILE, "a", encoding="utf-8") as sf:
+                        for s in new_sentences:
+                            sf.write(f"{s}\n")
+                except Exception as e:
+                    print(f"Session write failed: {e}")
+                for s in new_sentences:
+                    seen_sentences.add(s)
+
             for w in extract_words_from_text(last_text):
                 all_words.append(w)
                 if w in seen_words:
                     continue
                 seen_words.add(w)
-                word = get_translations_for_word_exact(DB_PATH, w)
-                if word:
-                    print(f"{w} -> {word}")
+                # no per-word output; sentence-level translation happens above
             
             time.sleep(OCR_INTERVAL_SEC)
     except KeyboardInterrupt:
         print("\nStopping… analyzing collected sentences.\n")
-        counter = Counter(all_words)
+        # Build frequency from session.txt instead of in-memory OCR frames
+        session_text = ""
+        try:
+            with open(SESSION_FILE, "r", encoding="utf-8") as sf:
+                session_text = sf.read()
+        except FileNotFoundError:
+            session_text = ""
+        words_from_session = extract_words_from_text(session_text)
+        counter = Counter(words_from_session)
         with open(OUTPUT_CSV, "w", encoding="utf-8") as f:
             f.write("frequency,word,translation\n")
             for word, freq in counter.most_common():
