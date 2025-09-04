@@ -2,6 +2,7 @@
 import re
 import time
 import argparse
+import sys
 from datetime import datetime
 import sqlite3
 import pyautogui
@@ -10,12 +11,14 @@ from pathlib import Path
 from PIL import Image, ImageOps, ImageFilter, ImageStat
 from collections import Counter
 # For windows if not in path, use:
-# pytesseract.pytesseract.tesseract_cmd = r"C:\Users\<username>\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
+# pytesseract.pytesseract.tesseract_cmd = r"C:\Users\username\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 # ---------------- Configuration ----------------
 # WIKDICT_URL = "https://download.wikdict.com/dictionaries/sqlite/2_2025-08/de-en.sqlite3"
+# DICT_PATH = https://freedict.org/downloads/
 # 'lexentry', 'sense_num', 'sense', 'written_rep', 'trans_list', 'score', 'is_good', 'importance'
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "de-en.sqlite3"
+DICT_PATH = BASE_DIR / "deu-eng.dict"
 OUTPUT_CSV = BASE_DIR / "words.csv"
 SESSION_FILE = BASE_DIR / "session.txt"
 
@@ -127,18 +130,74 @@ def get_translations_for_word_exact(db_path: Path, word: str):
 
 
 def get_first_translation(db_path: Path, word: str):
+    # Try database first
     res = get_translations_for_word_exact(db_path, word)
-    if not res:
+    if res:
+        # `res` is expected to be a string with variants like "a | b | c"
+        if isinstance(res, list):
+            s = res[0] if res else None
+        else:
+            s = res
+        if s:
+            first = s.split("|")[0].strip()
+            if first:
+                return first
+
+    # Fallback: try the flat dictionary file at DICT_PATH
+    try:
+        dict_trans = get_translation_from_dict(DICT_PATH, word)
+        if dict_trans:
+            return dict_trans
+    except Exception:
+        # If the dict read fails, silently ignore and return None
+        pass
+
+    return None
+
+
+def get_translation_from_dict(dict_path: Path, word: str):
+    """
+    Search a simple flat dictionary file for an exact German headword match.
+
+    Format examples (entries separated by blank lines or sequential lines):
+    alkyliert /ˌalkyːlˈiːɾt/
+    alkylated
+
+    The function matches a line starting with the exact `word` (allowing an optional
+    pronunciation after the word) and returns the next non-empty line as the
+    English translation.
+    """
+    if not dict_path or not Path(dict_path).exists():
         return None
-    # `res` is expected to be a string with variants like "a | b | c"
-    if isinstance(res, list):
-        s = res[0] if res else None
-    else:
-        s = res
-    if not s:
-        return None
-    first = s.split("|")[0].strip()
-    return first if first else None
+    pat = re.compile(rf"^{re.escape(word)}(?:\s+/.*)?\s*$", re.IGNORECASE)
+    try:
+        with open(dict_path, "r", encoding="utf-8") as f:
+            lines = [ln.rstrip("\n\r") for ln in f]
+    except UnicodeDecodeError:
+        # Try with a fallback encoding common on Windows
+        try:
+            with open(dict_path, "r", encoding="latin-1") as f:
+                lines = [ln.rstrip("\n\r") for ln in f]
+        except Exception:
+            return None
+
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        if pat.match(line):
+            # find next non-empty line for translation
+            j = i + 1
+            while j < n and not lines[j].strip():
+                j += 1
+            if j < n:
+                return lines[j].strip()
+            return None
+        i += 1
+    return None
 
 
 def preserve_case(src: str, dst: str) -> str:
@@ -198,7 +257,8 @@ def main():
         parser.add_argument("--scale", type=float, default=2.0, help="Upscale factor before OCR. Default 2.0")
         parser.add_argument("--whitelist", action="store_true", help="Restrict characters to letters, umlauts, ß, digits, common punctuation")
         parser.add_argument("--deu-only", action="store_true", help="Use German language only for OCR")
-        parser.add_argument("--no-auto-invert", action="store_true", help="Disable automatic invert when background is dark")
+        parser.add_argument("--auto-invert", action="store_true", help="Disable automatic invert when background is dark")
+        parser.add_argument("--translate", type=str, help="Translate a single German word and exit")
         args = parser.parse_args()
         debug = args.debug
         debug_dir = (Path(OUTPUT_CSV).parent / "debug") if debug else None
@@ -209,7 +269,21 @@ def main():
             wl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß0123456789.,;:()[]-?!%+/ "
             ocr_cfg += f' -c tessedit_char_whitelist="{wl}" -c preserve_interword_spaces=1'
         ocr_scale = args.scale
-        auto_invert = not args.no_auto_invert
+        auto_invert = args.auto_invert
+        # If user requested a single-word translation, do it and exit
+        if args.translate:
+            word = args.translate.strip()
+            if not word:
+                print("No word provided to --translate")
+                sys.exit(2)
+            trans = get_first_translation(DB_PATH, word)
+            if trans:
+                trans = preserve_case(word, trans)
+                print(f"{word} => {trans}")
+            else:
+                print(f"No translation found for '{word}'.")
+            sys.exit(0)
+
         region = prompt_region()
         last_text = ""
         seen_words = set()
