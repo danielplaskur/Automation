@@ -9,9 +9,13 @@ import pyautogui
 import pytesseract
 from pathlib import Path
 from PIL import Image, ImageOps, ImageFilter, ImageStat
+import os
+import threading
+import tkinter as tk
+from typing import Optional
 from collections import Counter
 # For windows if not in path, use:
-# pytesseract.pytesseract.tesseract_cmd = r"C:\Users\username\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
+# pytesseract.pytesseract.tesseract_cmd = r"C:\Users\user\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 # ---------------- Configuration ----------------
 # WIKDICT_URL = "https://download.wikdict.com/dictionaries/sqlite/2_2025-08/de-en.sqlite3"
 # DICT_PATH = https://freedict.org/downloads/
@@ -43,7 +47,7 @@ def extract_words_from_text(text: str):
             words.append(w)
     return words
 
-def prompt_region():
+def prompt_region(debug: bool = False, debug_dir: Path | None = None):
     print("Place the mouse at the TOP-LEFT corner of the region, then press Enter.")
     input()
     x1, y1 = pyautogui.position()
@@ -90,25 +94,73 @@ def preprocess_for_ocr(img: Image.Image, scale: float = 2.0, auto_invert: bool =
 def ocr_region(region, debug_path=None, config: str = None, lang: str = TESS_LANG, scale: float = 2.0, auto_invert: bool = True):
     # Screenshot
     img: Image.Image = pyautogui.screenshot(region=region)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    # Save raw capture if debugging
-    if debug_path:
-        try:
-            Path(debug_path).mkdir(parents=True, exist_ok=True)
-            img.save(Path(debug_path) / f"capture_{ts}.png")
-        except Exception as e:
-            print(f"Debug save failed: {e}")
     # Preprocess for OCR
     pimg = preprocess_for_ocr(img, scale=scale, auto_invert=auto_invert)
-    if debug_path:
-        try:
-            pimg.save(Path(debug_path) / f"capture_{ts}_prep.png")
-        except Exception as e:
-            print(f"Debug save failed: {e}")
+    # Note: debug image saving disabled; --debug now shows an on-screen overlay only
     # OCR
     cfg = config if config is not None else "--psm 6 --oem 3"
     text = pytesseract.image_to_string(pimg, lang=lang, config=cfg)
     return text
+
+
+class RegionOverlay:
+    """On-screen overlay that shows a red rectangle for the OCR region.
+
+    Best-effort implementation using tkinter. Created and run in a background
+    thread so the main OCR loop can continue. Works on Windows in most cases.
+    """
+    def __init__(self, region):
+        self.region = region  # (left, top, width, height)
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        # best-effort join
+        if self._thread:
+            self._thread.join(timeout=0.5)
+
+    def _run(self):
+        try:
+            left, top, width, height = self.region
+            root = tk.Tk()
+            root.overrideredirect(True)
+            root.attributes("-topmost", True)
+            # Full-screen transparent background
+            screen_w = root.winfo_screenwidth()
+            screen_h = root.winfo_screenheight()
+            root.geometry(f"{screen_w}x{screen_h}+0+0")
+            # Use a color that we'll make transparent
+            transparent_color = "#ff00ff"
+            canvas = tk.Canvas(root, width=screen_w, height=screen_h, bg=transparent_color, highlightthickness=0)
+            canvas.pack()
+            # Draw rectangle for region
+            canvas.create_rectangle(left, top, left + width, top + height, outline="red", width=3)
+            # Make the chosen background color transparent (Windows)
+            try:
+                root.wm_attributes("-transparentcolor", transparent_color)
+            except Exception:
+                # ignore if unsupported
+                pass
+
+            # Periodically check for stop event
+            def poll():
+                if self._stop.is_set():
+                    root.destroy()
+                else:
+                    root.after(200, poll)
+
+            root.after(200, poll)
+            root.mainloop()
+        except Exception:
+            # Overlay is optional; ignore failures
+            return
 
 
 def get_translations_for_word_exact(db_path: Path, word: str):
@@ -257,11 +309,17 @@ def main():
         parser.add_argument("--scale", type=float, default=2.0, help="Upscale factor before OCR. Default 2.0")
         parser.add_argument("--whitelist", action="store_true", help="Restrict characters to letters, umlauts, ß, digits, common punctuation")
         parser.add_argument("--deu-only", action="store_true", help="Use German language only for OCR")
-        parser.add_argument("--auto-invert", action="store_true", help="Disable automatic invert when background is dark")
+        parser.add_argument("--auto-invert", action="store_true", help="Automatic invert when background is light")
         parser.add_argument("--translate", type=str, help="Translate a single German word and exit")
         args = parser.parse_args()
         debug = args.debug
-        debug_dir = (Path(OUTPUT_CSV).parent / "debug") if debug else None
+        # Create timestamped filenames for this session so we know when it ran
+        ts_run = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_file = BASE_DIR / f"session_{ts_run}.txt"
+        output_csv = BASE_DIR / f"words_{ts_run}.csv"
+
+        # Debug directory next to output CSV
+        debug_dir = (BASE_DIR / "debug") if debug else None
         ocr_lang = "deu" if args.deu_only else TESS_LANG
         ocr_cfg = f"--psm {args.psm} --oem {args.oem}"
         if args.whitelist:
@@ -284,7 +342,14 @@ def main():
                 print(f"No translation found for '{word}'.")
             sys.exit(0)
 
-        region = prompt_region()
+        region = prompt_region(debug=debug, debug_dir=debug_dir)
+        overlay = None
+        if debug:
+            try:
+                overlay = RegionOverlay(region)
+                overlay.start()
+            except Exception:
+                overlay = None
         last_text = ""
         seen_words = set()
         all_words = list()
@@ -311,9 +376,9 @@ def main():
                 for s in new_sentences:
                     translated = translate_sentence(DB_PATH, s)
                     print(f"{s}\n=> {translated}\n")
-                # Append only originals to session.txt, one per line
+                # Append only originals to session file, one per line
                 try:
-                    with open(SESSION_FILE, "a", encoding="utf-8") as sf:
+                    with open(session_file, "a", encoding="utf-8") as sf:
                         for s in new_sentences:
                             sf.write(f"{s}\n")
                 except Exception as e:
@@ -327,26 +392,34 @@ def main():
                     continue
                 seen_words.add(w)
                 # no per-word output; sentence-level translation happens above
-            
+
             time.sleep(OCR_INTERVAL_SEC)
     except KeyboardInterrupt:
         print("\nStopping… analyzing collected sentences.\n")
-        # Build frequency from session.txt instead of in-memory OCR frames
+        if overlay:
+            try:
+                overlay.stop()
+            except Exception:
+                pass
+        # Build frequency from the session file created for this run
         session_text = ""
         try:
-            with open(SESSION_FILE, "r", encoding="utf-8") as sf:
+            with open(session_file, "r", encoding="utf-8") as sf:
                 session_text = sf.read()
         except FileNotFoundError:
             session_text = ""
         words_from_session = extract_words_from_text(session_text)
         counter = Counter(words_from_session)
-        with open(OUTPUT_CSV, "w", encoding="utf-8") as f:
-            f.write("frequency,word,translation\n")
-            for word, freq in counter.most_common():
-                translations = get_translations_for_word_exact(DB_PATH, word)
-                if isinstance(translations, list):
-                    translations = " | ".join(translations)
-                f.write(f"{freq},{word},\"{translations}\"\n")
+        try:
+            with open(output_csv, "w", encoding="utf-8") as f:
+                f.write("frequency,word,translation\n")
+                for word, freq in counter.most_common():
+                    translations = get_translations_for_word_exact(DB_PATH, word)
+                    if isinstance(translations, list):
+                        translations = " | ".join(translations)
+                    f.write(f"{freq},{word},\"{translations}\"\n")
+        except Exception as e:
+            print(f"Failed writing output CSV: {e}")
 
 
 if __name__ == "__main__":
