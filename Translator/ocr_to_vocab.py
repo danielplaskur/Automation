@@ -9,7 +9,8 @@ import pytesseract
 from pathlib import Path
 from PIL import Image, ImageOps, ImageFilter, ImageStat
 from collections import Counter
-
+# For windows if not in path, use:
+# pytesseract.pytesseract.tesseract_cmd = r"C:\Users\<username>\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 # ---------------- Configuration ----------------
 # WIKDICT_URL = "https://download.wikdict.com/dictionaries/sqlite/2_2025-08/de-en.sqlite3"
 # 'lexentry', 'sense_num', 'sense', 'written_rep', 'trans_list', 'score', 'is_good', 'importance'
