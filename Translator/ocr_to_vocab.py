@@ -14,8 +14,9 @@ import threading
 import tkinter as tk
 from typing import Optional
 from collections import Counter
+import csv
 # For windows if not in path, use:
-# pytesseract.pytesseract.tesseract_cmd = r"C:\Users\user\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
+pytesseract.pytesseract.tesseract_cmd = r"C:\Users\username\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 # ---------------- Configuration ----------------
 # WIKDICT_URL = "https://download.wikdict.com/dictionaries/sqlite/2_2025-08/de-en.sqlite3"
 # DICT_PATH = https://freedict.org/downloads/
@@ -196,13 +197,13 @@ def get_first_translation(db_path: Path, word: str):
                 return first
 
     # Fallback: try the flat dictionary file at DICT_PATH
-    try:
-        dict_trans = get_translation_from_dict(DICT_PATH, word)
-        if dict_trans:
-            return dict_trans
-    except Exception:
-        # If the dict read fails, silently ignore and return None
-        pass
+    # try:
+    #     dict_trans = get_translation_from_dict(DICT_PATH, word)
+    #     if dict_trans:
+    #         return dict_trans
+    # except Exception:
+    #     # If the dict read fails, silently ignore and return None
+    #     pass
 
     return None
 
@@ -250,6 +251,137 @@ def get_translation_from_dict(dict_path: Path, word: str):
             return None
         i += 1
     return None
+
+
+def find_latest_words_csv(base_dir: Path) -> Path | None:
+    files = sorted(base_dir.glob("words_*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[0] if files else None
+
+
+def update_db_with_translation(db_path: Path, word: str, translation: str) -> bool:
+    """Try to update existing translation row, otherwise insert a new one.
+
+    Returns True on success, False on failure.
+    """
+    try:
+        con = sqlite3.connect(str(db_path))
+        cur = con.cursor()
+        # Try updating any existing row (case-insensitive match)
+        cur.execute("UPDATE translation SET trans_list=?, score=?, is_good=1 WHERE lower(written_rep)=lower(?)",
+                    (translation, 1000, word))
+        if cur.rowcount > 0:
+            con.commit()
+            return True
+
+        # No existing row updated; attempt to insert using common columns if they exist
+        cols = [r[1] for r in cur.execute("PRAGMA table_info(translation)").fetchall()]
+        common = ["written_rep", "trans_list", "score", "is_good"]
+        if all(c in cols for c in common):
+            cur.execute(
+                "INSERT INTO translation (written_rep, trans_list, score, is_good) VALUES (?, ?, ?, 1)",
+                (word, translation, 1000),
+            )
+            con.commit()
+            return True
+
+        # If we couldn't use the existing table, create a dedicated user_translations table
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS user_translations (written_rep TEXT PRIMARY KEY, trans_list TEXT, score INTEGER, is_good INTEGER)"
+        )
+        cur.execute(
+            "INSERT OR REPLACE INTO user_translations (written_rep, trans_list, score, is_good) VALUES (?, ?, ?, 1)",
+            (word, translation, 1000),
+        )
+        con.commit()
+        return True
+    except Exception as e:
+        print(f"DB update failed for {word}: {e}")
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def review_latest_words_and_prompt(db_path: Path, base_dir: Path):
+    """Open the latest words_*.csv, prompt for missing translations, and update DB."""
+    csv_path = find_latest_words_csv(base_dir)
+    if not csv_path:
+        print("No words_*.csv files found to review.")
+        return
+
+    print(f"Reviewing: {csv_path}")
+    # Load entire CSV so we can update it in-place and rewrite later
+    try:
+        with open(csv_path, "r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or ["frequency", "word", "translation"]
+            rows = [r for r in reader]
+    except Exception as e:
+        print(f"Failed reading {csv_path}: {e}")
+        return
+
+    # Find rows missing translations
+    missing_indices = []
+    for idx, row in enumerate(rows):
+        word = (row.get("word") or "").strip()
+        trans = (row.get("translation") or "").strip()
+        if not word:
+            continue
+        if not trans or trans.lower() in ("", "none", "nan"):
+            missing_indices.append(idx)
+
+    if not missing_indices:
+        print("No missing translations found in the latest CSV.")
+        return
+
+    print(f"Found {len(missing_indices)} words without translations.")
+    # Prompt and update both DB and CSV rows. Catch Ctrl+C so we still write back CSV.
+    try:
+        total = len(missing_indices)
+        for i, idx in enumerate(missing_indices, start=1):
+            row = rows[idx]
+            w = (row.get("word") or "").strip()
+            if not w:
+                continue
+            while True:
+                prompt = f"{i} -> {total} Enter translation for '{w}' (or leave empty to skip): "
+                val = input(prompt).strip()
+                if val == "":
+                    # Mark this row for removal so it won't be prompted next time
+                    row["_remove"] = True
+                    print(f"Skipped and removed from CSV: {w}")
+                    break
+                # Always update the in-memory CSV row so future runs will skip this word
+                row["translation"] = val
+                ok = update_db_with_translation(db_path, w, val)
+                if ok:
+                    print("Saved to DB and updated CSV in-memory.")
+                else:
+                    print("DB update failed, but CSV updated locally.")
+                break
+    except KeyboardInterrupt:
+        print("\nInterrupted by user, will save CSV with any translations entered so far.")
+
+    # Write back CSV with updated translations
+    try:
+        # Filter out rows marked for removal (skipped by user)
+        filtered = [r for r in rows if not r.get("_remove")]
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for r in filtered:
+                # Ensure all fieldnames exist in row
+                out = {k: (r.get(k, "") if r.get(k, "") is not None else "") for k in fieldnames}
+                writer.writerow(out)
+        print(f"Updated CSV written to {csv_path}")
+    except Exception as e:
+        print(f"Failed writing updated CSV {csv_path}: {e}")
 
 
 def preserve_case(src: str, dst: str) -> str:
@@ -301,6 +433,7 @@ def completed_sentences_and_remainder(text: str):
 
 
 def main():
+    overlay = None
     try:
         parser = argparse.ArgumentParser()
         parser.add_argument("--debug", action="store_true", help="Save captured region images to debug/ with timestamps")
@@ -311,6 +444,7 @@ def main():
         parser.add_argument("--deu-only", action="store_true", help="Use German language only for OCR")
         parser.add_argument("--auto-invert", action="store_true", help="Automatic invert when background is light")
         parser.add_argument("--translate", type=str, help="Translate a single German word and exit")
+        parser.add_argument("--review-latest", action="store_true", help="Review latest words_*.csv for missing translations and update DB")
         args = parser.parse_args()
         debug = args.debug
         # Create timestamped filenames for this session so we know when it ran
@@ -340,6 +474,10 @@ def main():
                 print(f"{word} => {trans}")
             else:
                 print(f"No translation found for '{word}'.")
+            sys.exit(0)
+
+        if args.review_latest:
+            review_latest_words_and_prompt(DB_PATH, BASE_DIR)
             sys.exit(0)
 
         region = prompt_region(debug=debug, debug_dir=debug_dir)
