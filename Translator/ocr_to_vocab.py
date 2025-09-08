@@ -259,37 +259,15 @@ def find_latest_words_csv(base_dir: Path) -> Path | None:
 
 
 def update_db_with_translation(db_path: Path, word: str, translation: str) -> bool:
-    """Try to update existing translation row, otherwise insert a new one.
+    """Try to insert translation row.
 
     Returns True on success, False on failure.
     """
     try:
         con = sqlite3.connect(str(db_path))
         cur = con.cursor()
-        # Try updating any existing row (case-insensitive match)
-        cur.execute("UPDATE translation SET trans_list=?, score=?, is_good=1 WHERE lower(written_rep)=lower(?)",
-                    (translation, 1000, word))
-        if cur.rowcount > 0:
-            con.commit()
-            return True
-
-        # No existing row updated; attempt to insert using common columns if they exist
-        cols = [r[1] for r in cur.execute("PRAGMA table_info(translation)").fetchall()]
-        common = ["written_rep", "trans_list", "score", "is_good"]
-        if all(c in cols for c in common):
-            cur.execute(
+        cur.execute(
                 "INSERT INTO translation (written_rep, trans_list, score, is_good) VALUES (?, ?, ?, 1)",
-                (word, translation, 1000),
-            )
-            con.commit()
-            return True
-
-        # If we couldn't use the existing table, create a dedicated user_translations table
-        cur.execute(
-            "CREATE TABLE IF NOT EXISTS user_translations (written_rep TEXT PRIMARY KEY, trans_list TEXT, score INTEGER, is_good INTEGER)"
-        )
-        cur.execute(
-            "INSERT OR REPLACE INTO user_translations (written_rep, trans_list, score, is_good) VALUES (?, ?, ?, 1)",
             (word, translation, 1000),
         )
         con.commit()
@@ -308,17 +286,23 @@ def update_db_with_translation(db_path: Path, word: str, translation: str) -> bo
             pass
 
 
-def review_latest_words_and_prompt(db_path: Path, base_dir: Path):
-    """Open the latest words_*.csv, prompt for missing translations, and update DB."""
-    csv_path = find_latest_words_csv(base_dir)
-    if not csv_path:
-        print("No words_*.csv files found to review.")
-        return
+def review_latest_words_and_prompt(db_path: Path, base_dir: Path, csv_path: str | None = None):
+    """Open the provided words CSV (or latest if none provided), prompt for missing translations, and update DB."""
+    if csv_path:
+        csv_path_obj = Path(csv_path)
+        if not csv_path_obj.exists():
+            print(f"Specified file not found: {csv_path}")
+            return
+    else:
+        csv_path_obj = find_latest_words_csv(base_dir)
+        if not csv_path_obj:
+            print("No words_*.csv files found to review.")
+            return
 
-    print(f"Reviewing: {csv_path}")
+    print(f"Reviewing: {csv_path_obj}")
     # Load entire CSV so we can update it in-place and rewrite later
     try:
-        with open(csv_path, "r", encoding="utf-8", newline="") as f:
+        with open(csv_path_obj, "r", encoding="utf-8", newline="") as f:
             reader = csv.DictReader(f)
             fieldnames = reader.fieldnames or ["frequency", "word", "translation"]
             rows = [r for r in reader]
@@ -444,7 +428,12 @@ def main():
         parser.add_argument("--deu-only", action="store_true", help="Use German language only for OCR")
         parser.add_argument("--auto-invert", action="store_true", help="Automatic invert when background is light")
         parser.add_argument("--translate", type=str, help="Translate a single German word and exit")
-        parser.add_argument("--review-latest", action="store_true", help="Review latest words_*.csv for missing translations and update DB")
+        parser.add_argument(
+            "--review",
+            type=str,
+            default=None,
+            help="Path to a specific words.csv to review",
+        )
         args = parser.parse_args()
         debug = args.debug
         # Create timestamped filenames for this session so we know when it ran
@@ -476,8 +465,9 @@ def main():
                 print(f"No translation found for '{word}'.")
             sys.exit(0)
 
-        if args.review_latest:
-            review_latest_words_and_prompt(DB_PATH, BASE_DIR)
+        if args.review is not None:
+            # If user supplied a path, use that file; otherwise review latest in BASE_DIR
+            review_latest_words_and_prompt(DB_PATH, BASE_DIR, csv_path=args.review)
             sys.exit(0)
 
         region = prompt_region(debug=debug, debug_dir=debug_dir)
@@ -513,7 +503,7 @@ def main():
                 # Translate and print all newly seen complete sentences in order
                 for s in new_sentences:
                     translated = translate_sentence(DB_PATH, s)
-                    print(f"{s}\n=> {translated}\n")
+                    print(f"{translated}\n")
                 # Append only originals to session file, one per line
                 try:
                     with open(session_file, "a", encoding="utf-8") as sf:
@@ -562,3 +552,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# TODO: potrebujem aby rozdelovalo po 7000 znakov aby som mohol pouzit copilot na vycuc.
+# Na zaciatok potrebujem pridat tento custom prompt: {"task":"meeting_summary","instructions":{"language":"English","detail_level":"high","structure":[{"section":"Topics Discussed","description":"List and describe all major points, issues, and subjects that were addressed during the meeting."},{"section":"Resolutions","description":"Explain how each issue was resolved or what decisions were made."},{"section":"Next Steps","description":"Outline planned actions, responsible persons, and any deadlines or follow-up items."},{"section":"Unresolved or Unclear Items","description":"Highlight any topics that were not fully resolved or need further clarification."}]},"input_format":"inline_text","output_format":"structured_text"}
