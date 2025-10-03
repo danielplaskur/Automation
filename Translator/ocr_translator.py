@@ -1,3 +1,4 @@
+import re
 import pytesseract
 import pyautogui
 import time
@@ -10,6 +11,10 @@ from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+speaker_patterns = [
+    r'^(User Name \d+ [A-Z]+)'
+]
 
 # Configure Tesseract path from environment
 tesseract_path = os.getenv('TESSERACT_PATH')
@@ -109,13 +114,20 @@ class OCRTranslator:
     def extract_text_from_image(self, image):
         """Extract text from image using OCR"""
         try:
-            # Convert to grayscale only (minimal processing)
+            # Convert to grayscale and enhance contrast
             gray_image = ImageOps.grayscale(image)
 
-            # Try different PSM modes with minimal preprocessing
-            config = r'--oem 3 --psm 3'
-            text = pytesseract.image_to_string(gray_image, lang='deu+eng', config=config)
-            return text.strip()
+            # Try different PSM modes for better accuracy
+            configs = [
+                r'--oem 3 --psm 3'
+            ]
+
+            for config in configs:
+                text = pytesseract.image_to_string(gray_image, lang='deu+eng', config=config)
+                if text.strip():
+                    return text.strip()
+
+            return ""
         except Exception:
             return ""
 
@@ -127,7 +139,7 @@ class OCRTranslator:
         translated_parts = []
 
         # Split by common delimiters and translate word by word
-        words = german_text.replace('\n', ' ').replace('\r', ' ').split()
+        words = german_text.split()
 
         for word in words:
             # Clean the word (remove punctuation for translation lookup)
@@ -159,10 +171,38 @@ class OCRTranslator:
             # If still no translation found, use the original word
             if not translated_word:
                 translated_word = word
+            
+            # print(word, '->', translated_word)
 
             translated_parts.append(translated_word)
 
         return ' '.join(translated_parts)
+
+    def _process_speaker_sentences(self, speaker_name, text_parts):
+        """Process accumulated text for a speaker and print complete sentences"""
+        # Join all text parts for this speaker
+        full_text = ' '.join(text_parts)
+
+        # Split into sentences based on punctuation
+        sentences = re.split(r'([.!?]+)', full_text)
+
+        # Process sentences in pairs (sentence + punctuation)
+        for i in range(0, len(sentences) - 1, 2):
+            sentence = sentences[i].strip()
+            punctuation = sentences[i + 1] if i + 1 < len(sentences) else ''
+
+            # Only process if we have a sentence with punctuation
+            if sentence and punctuation.strip() in ['.', '?', '!']:
+                # Translate the sentence
+                translated_sentence = self.translate_text(sentence)
+
+                # Capitalize first character and add original punctuation
+                if translated_sentence.strip():
+                    capitalized_sentence = translated_sentence.strip()
+                    capitalized_sentence = capitalized_sentence[0].upper() + capitalized_sentence[1:] + punctuation.strip()
+
+                    print(f"\n\n{speaker_name}")
+                    print(f"{capitalized_sentence}")
 
     def record_and_translate(self):
         """Main recording and translation function"""
@@ -179,13 +219,42 @@ class OCRTranslator:
                     # Extract text
                     german_text = self.extract_text_from_image(screenshot)
 
-                    if german_text:  # Only process non-empty text
-                        # Translate the text
-                        translated_text = self.translate_text(german_text)
+                    if german_text:
+                        # Process the entire text to find complete sentences by speaker
+                        current_speaker = None
+                        current_text = []
 
-                        # Print only the translated text (nothing else)
-                        print()
-                        print(translated_text)
+                        # Split into lines and process each line
+                        lines = german_text.splitlines()
+
+                        for line in lines:
+                            line = line.strip()
+                            if not line:
+                                continue
+
+                            # Check if this line contains a speaker name
+                            speaker_name = None
+                            for pattern in speaker_patterns:
+                                match = re.search(pattern, line)
+                                if match:
+                                    speaker_name = match.group(1)
+                                    break
+
+                            if speaker_name:
+                                # Process previous speaker's text if exists
+                                if current_speaker and current_text:
+                                    self._process_speaker_sentences(current_speaker, current_text)
+
+                                # Start new speaker
+                                current_speaker = speaker_name
+                                current_text = [line.replace(speaker_name, '').strip()]
+                            elif current_speaker:
+                                # Continue current speaker's text
+                                current_text.append(line)
+
+                        # Process the last speaker's text
+                        if current_speaker and current_text:
+                            self._process_speaker_sentences(current_speaker, current_text)
 
                 time.sleep(self.interval)
 
@@ -214,6 +283,6 @@ def main():
         translator.run()
     finally:
         translator.cleanup()
-
+ 
 if __name__ == "__main__":
     main()
