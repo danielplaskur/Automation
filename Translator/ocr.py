@@ -3,13 +3,45 @@ import re
 import pytesseract
 import pyautogui
 import os
+import requests
+import urllib3
 from PIL import ImageOps
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 pytesseract.pytesseract.tesseract_cmd = r"C:\Users\user\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
-speaker_patterns = [
+SPEAKER_PATTERN = [
     r'^([A-Z][a-z]+ [A-Z][a-z]+ \d+ [A-Z]+)'
 ]
-combined_pattern = re.compile(r'|'.join(speaker_patterns), re.MULTILINE)
+COMBINED_PATTERN = re.compile(r'|'.join(SPEAKER_PATTERN), re.MULTILINE)
+DEEPL_API_KEY = ""
+DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"
+
+
+def get_translation_from_deepl(text, lang="EN"):
+    """Get translation from DeepL API"""
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'DeepL-Auth-Key {DEEPL_API_KEY}'
+    }
+
+    json_data = {
+        "text": [text],
+        "source_lang": "DE",
+        "target_lang": lang
+    }
+
+    try:
+        response = requests.post(DEEPL_API_URL, headers=headers, json=json_data, verify=False)
+        response.raise_for_status()
+
+        result = response.json()
+        if result and 'translations' in result and len(result['translations']) > 0:
+            return result['translations'][0]['text']
+    except requests.RequestException as e:
+        pass
+        print(f"DeepL API error: {e}")
+    return None
+
 
 def extract_complete_sentences(text):
     """Extract complete sentences ending with punctuation"""
@@ -19,27 +51,27 @@ def extract_complete_sentences(text):
     return [s.strip() for s in sentences if s.strip()]
 
 
-def extract_speaker_blocks(text):
-    """Extract blocks of text grouped by speaker until the next speaker appears"""
-    blocks = []
-    current_speaker = None
-    current_text = []
+# def extract_speaker_blocks(text):
+#     """Extract blocks of text grouped by speaker until the next speaker appears"""
+#     blocks = []
+#     current_speaker = None
+#     current_text = []
 
-    for line in text.splitlines():
-        match = combined_pattern.match(line)
-        if match:
-            if current_speaker and current_text:
-                blocks.append((current_speaker, '\n'.join(current_text).strip()))
-            current_speaker = match.group(0)
-            current_text = [line]
-        else:
-            if current_speaker:
-                current_text.append(line)
+#     for line in text.splitlines():
+#         match = COMBINED_PATTERN.match(line)
+#         if match:
+#             if current_speaker and current_text:
+#                 blocks.append((current_speaker, '\n'.join(current_text).strip()))
+#             current_speaker = match.group(0)
+#             current_text = [line]
+#         else:
+#             if current_speaker:
+#                 current_text.append(line)
 
-    if current_speaker and current_text:
-        blocks.append((current_speaker, '\n'.join(current_text).strip()))
+#     if current_speaker and current_text:
+#         blocks.append((current_speaker, '\n'.join(current_text).strip()))
 
-    return blocks
+#     return blocks
 
 
 def get_mouse_position():
@@ -151,7 +183,7 @@ def main():
             text = extract_text_from_image(image).replace('|', 'I')
             sentences = extract_complete_sentences(text)
             for sentence in sentences:
-                for pattern in speaker_patterns:
+                for pattern in SPEAKER_PATTERN:
                     match = re.match(pattern, sentence)
                     if match:
                         speaker_name = match.group(1)
@@ -160,10 +192,15 @@ def main():
                             capitalized_text = remaining_text[0].upper() + remaining_text[1:] if len(remaining_text) > 1 else remaining_text.upper()
                         else:
                             capitalized_text = ""
+                        
                         session_text = f"\n{speaker_name}\n{capitalized_text.replace('\n', ' ')}"
                         if "(Unverified)" not in session_text:
                             if session_text not in session:
-                                print(session_text)
+                                translated_text = get_translation_from_deepl(capitalized_text)
+                                if translated_text:
+                                    print(f"\n{speaker_name}\n{translated_text.replace('\n', ' ')}")
+                                else:
+                                    print(session_text)
                             session.add(session_text)
             # sentences = extract_speaker_blocks(text)
             # for speaker_name, block_text in sentences:
