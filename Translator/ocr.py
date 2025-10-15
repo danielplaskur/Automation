@@ -5,11 +5,18 @@ import pyautogui
 import os
 from PIL import ImageOps
 
-pytesseract.pytesseract.tesseract_cmd = r"C:\Users\sotdb\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
+pytesseract.pytesseract.tesseract_cmd = r"C:\Users\user\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 speaker_patterns = [
     r'^([A-Z][a-z]+ [A-Z][a-z]+ \d+ [A-Z]+)'
 ]
 combined_pattern = re.compile(r'|'.join(speaker_patterns), re.MULTILINE)
+
+def extract_complete_sentences(text):
+    """Extract complete sentences ending with punctuation"""
+    # Pattern to match sentences ending with . ! or ?
+    sentence_pattern = r'[^.!?]*[.!?]'
+    sentences = re.findall(sentence_pattern, text.strip())
+    return [s.strip() for s in sentences if s.strip()]
 
 
 def extract_speaker_blocks(text):
@@ -142,18 +149,34 @@ def main():
             if image is None:
                 continue
             text = extract_text_from_image(image).replace('|', 'I')
-            sentences = extract_speaker_blocks(text)
-            for speaker_name, block_text in sentences:
-                remaining_text = block_text.replace(speaker_name, '').strip()
-                if remaining_text:
-                    capitalized_text = remaining_text[0].upper() + remaining_text[1:] if len(remaining_text) > 1 else remaining_text.upper()
-                else:
-                    capitalized_text = ""
-                session_text = f"\n{speaker_name}\n{capitalized_text.replace('\n', ' ')}"
-                if "(Unverified)" not in session_text:
-                    if session_text not in session:
-                        print(session_text)
-                    session.add(session_text)
+            sentences = extract_complete_sentences(text)
+            for sentence in sentences:
+                for pattern in speaker_patterns:
+                    match = re.match(pattern, sentence)
+                    if match:
+                        speaker_name = match.group(1)
+                        remaining_text = re.sub(pattern, '', sentence).strip()
+                        if remaining_text:
+                            capitalized_text = remaining_text[0].upper() + remaining_text[1:] if len(remaining_text) > 1 else remaining_text.upper()
+                        else:
+                            capitalized_text = ""
+                        session_text = f"\n{speaker_name}\n{capitalized_text.replace('\n', ' ')}"
+                        if "(Unverified)" not in session_text:
+                            if session_text not in session:
+                                print(session_text)
+                            session.add(session_text)
+            # sentences = extract_speaker_blocks(text)
+            # for speaker_name, block_text in sentences:
+            #     remaining_text = block_text.replace(speaker_name, '').strip()
+            #     if remaining_text:
+            #         capitalized_text = remaining_text[0].upper() + remaining_text[1:] if len(remaining_text) > 1 else remaining_text.upper()
+            #     else:
+            #         capitalized_text = ""
+            #     session_text = f"\n{speaker_name}\n{capitalized_text.replace('\n', ' ')}"
+            #     if "(Unverified)" not in session_text:
+            #         if session_text not in session:
+            #             print(session_text)
+            #         session.add(session_text)
     except KeyboardInterrupt:
         print(f"\nSaving {len(session)} unique session entries...")
 
